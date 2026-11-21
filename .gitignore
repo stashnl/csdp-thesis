@@ -1,0 +1,7 @@
+data/*
+!data/README.md
+.Rhistory
+.RData
+.Rproj.user/
+*.html
+.DS_Store

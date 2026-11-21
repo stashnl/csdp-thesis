@@ -1,0 +1,812 @@
+---
+title: "Make CSDP Great Again: data analysis"
+output: html_document
+date: "2024-12-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Necessary Packages and Dataset Import
+
+```{r}
+#packages
+library(ggplot2)
+library(dplyr)
+library(skimr)
+library(margins)
+library(detectseparation)
+library(car)
+library(modelsummary)
+library(tidyverse)
+library(performance)
+library(psych)
+library(mokken)
+library(haven)
+library(expss)
+library(naniar)
+library(broom)
+library(rio)
+library(ggResidpanel)
+library(mice)
+library(flextable)
+library(marginaleffects)
+library(pROC)
+
+#Dataset Import
+EB86 <- import("../data/ZA6788_v2-0-0.dta")
+
+```
+
+## Variables
+
+```{r}
+#Variable Coding
+
+#CSDP Support
+EB86 <- EB86 |>
+  mutate(csdp_support = dplyr::recode(as.numeric(qa17_4), 
+                          `2` = 0, 
+                          `3` = NA_real_, 
+                          `9` = NA_real_))
+
+# US favourability (With neutral category)
+EB86 <- EB86 |>  
+  mutate(us_favourability = case_when(
+    as.numeric(d73a_3) == 1 ~ 1,
+    as.numeric(d73a_3) == 2 ~ -1,
+    as.numeric(d73a_3) == 3 ~ 0,
+    as.numeric(d73a_3) %in% c(4, 9) ~ NA_real_
+  ) |> 
+  factor(levels = c(0, 1, -1), labels = c("Neutral", "Positive", "Negative")))
+
+# US Favourability as continous likert scale
+EB86 <- EB86 |>
+  mutate(us_favourability_likert = case_when(
+    as.numeric(d73a_3) == 1 ~ 3,  # Positive -> 3
+    as.numeric(d73a_3) == 2 ~ 1,  # Negative -> 1
+    as.numeric(d73a_3) == 3 ~ 2,  # Neutral -> 2
+    as.numeric(d73a_3) %in% c(4, 9) ~ NA_real_  # Missing values
+  ))
+
+#list of countries historically attacked/occpied by Soviet Union
+
+
+historical_threat_RU <- c("PL", "LT", "LV", "EE", "FI",  "CZ", "SK", "HU", "RO", "BG", "DE-E")
+
+EB86$historical_threat_RU <- ifelse(EB86$isocntry %in% historical_threat_RU, 1, 0)
+
+
+EB86$historical_threat_RU <- factor(EB86$historical_threat_RU,
+                                    levels = c(0, 1),
+                                    labels = c("No Threat", "Threat"))
+
+#adding identity
+
+EB86 <- EB86 |>
+  mutate(
+    nat_id = case_when(
+      qd1a_2 == 1 | qd1a_2 == 2 ~ 1,
+      qd1a_2 == 3 | qd1a_2 == 4 ~ 0,
+      qd1a_2 == 5 | qd1a_2 == 9 ~ NA_real_))
+
+EB86 <- EB86 |>
+  mutate(
+    eu_id = case_when(
+      qd1a_4 == 1 | qd1a_4 == 2 ~ 1,
+      qd1a_4 == 3 | qd1a_4 == 4 ~ 0,
+      qd1a_4 == 5 | qd1a_4 == 9 ~ NA_real_))
+
+
+#creating dummy vars for exclusive and inclusive ID
+
+EB86 <- EB86 |>
+  mutate(
+    inclusive_id_dummy = factor(
+      ifelse(eu_id == 1 & nat_id == 0 | eu_id == 1 & nat_id == 1, 1, 0),
+      levels = c(0, 1),
+      labels = c("Not Inclusive", "Inclusive")
+    ),
+    exclusive_id_dummy = factor(
+      ifelse(eu_id == 0 & nat_id == 1, 1, 0),
+      levels = c(0, 1),
+      labels = c("Not Exclusive", "Exclusive")))
+
+#sophistication (corect answers out of 3 about EU)
+#coding may be kept as is: 3 point scale with 1 = bad, 2= avg, 3 = good knowledge of eu
+
+#Age
+
+EB86 <- EB86|> 
+  mutate(Age = as.numeric(d11))
+
+#globalisation attitude (because anti-americanism linked to anti-capitalism)
+
+EB86 <- EB86|>
+  mutate(global_capitalism = case_when(
+    qa10_2 == 1 ~ 1,  # positive = 1
+    qa10_2 == 2 ~ 1,  # positive = 1
+    qa10_2 == 3 ~ 0,  # negative = 0
+    qa10_2 == 4 ~ 0,  # another negative = 0
+    qa10_2 == 5 ~ NA_real_  # don't know = NA
+  )) %>%
+  mutate(global_capitalism = as.factor(global_capitalism),  # Convert to factor
+         global_capitalism = relevel(global_capitalism, ref = "1"))  # Set positive as reference
+
+
+# cultural anti-ameircanism: coutnires explciitl mentioned in ltierature as having positive or negative collective memories of intractions with the US
+
+neg_us_memory <- c("FR", "ES", "PT", "GR", "DE-E", "CY", "SI", "LU")
+
+# Add indicator to dataset based on isocntry variable
+EB86$cultural_anti_am <- factor(ifelse(EB86$isocntry %in% neg_us_memory, 1, 0), 
+                                levels = c(0, 1), 
+                                labels = c("Neutral", "Negative"))
+
+
+
+#Political Trust Index
+#recoding component items
+EB86 <- EB86 |> 
+  mutate(judiciary_trust = case_when(
+    as.numeric(qa8a_6) == 2 ~ 0,  
+    as.numeric(qa8a_6) %in% c(3, 9) ~ NA_real_,
+    TRUE ~ as.numeric(qa8a_6)
+  )) 
+
+EB86 <- EB86 |> 
+  mutate(party_trust = case_when(
+    as.numeric(qa8a_10) == 2 ~ 0,  
+    as.numeric(qa8a_10) %in% c(3, 9) ~ NA_real_,
+    TRUE ~ as.numeric(qa8a_10)
+  )) 
+
+EB86 <- EB86 |> 
+  mutate(government_trust = case_when(
+    as.numeric(qa8a_12) == 2 ~ 0,  
+    as.numeric(qa8a_12) %in% c(3, 9) ~ NA_real_,
+    TRUE ~ as.numeric(qa8a_12)
+  )) 
+
+EB86 <- EB86 |> 
+  mutate(parliament_trust = case_when(
+    as.numeric(qa8a_13) == 2 ~ 0,  
+    as.numeric(qa8a_13) %in% c(3, 9) ~ NA_real_,
+    TRUE ~ as.numeric(qa8a_13)
+  )) 
+
+EB86 <- EB86 |> 
+  mutate(UN_trust = case_when(
+    as.numeric(qa8a_15) == 2 ~ 0,  
+    as.numeric(qa8a_15) %in% c(3, 9) ~ NA_real_,
+    TRUE ~ as.numeric(qa8a_15)
+  ))
+
+#Perform MSA to see if scale is acceptable
+#check monotonicity
+monotonicity_check_inst_trust <- check.monotonicity(EB86 |> dplyr::select(judiciary_trust, party_trust, government_trust, parliament_trust, UN_trust)|> filter(if_all(everything(), ~ !is.na(.))))
+
+
+plot(monotonicity_check_inst_trust)
+summary(monotonicity_check_inst_trust)
+
+#select items
+institutional_trust_Automated_Item_Selection_Procedure <- aisp(EB86 |> dplyr::select(judiciary_trust, party_trust, government_trust, parliament_trust, UN_trust)|> filter(if_all(everything(), ~ !is.na(.))), verbose = TRUE, )
+
+print(institutional_trust_Automated_Item_Selection_Procedure)
+
+#check invaraint item ordering
+institutional_trust_invariable_item_ordering_check <- check.iio(EB86 |> dplyr::select(judiciary_trust, party_trust, government_trust, parliament_trust, UN_trust)|> filter(if_all(everything(), ~ !is.na(.))), item.selection = TRUE, verbose = TRUE, fixed.item.order = TRUE)
+
+print(institutional_trust_invariable_item_ordering_check)
+
+#check scalability coefficeints
+institutional_trust_scalability_coefficients <- coefH(EB86 |> dplyr::select(judiciary_trust, party_trust, government_trust, parliament_trust, UN_trust)|> filter(if_all(everything(), ~ !is.na(.))), se = TRUE, ci = TRUE, fixed.itemstep.order = TRUE)
+
+print(institutional_trust_scalability_coefficients)
+
+
+#final reliability check
+
+inst_trust_reliability_check <- check.reliability(EB86 |> dplyr::select(judiciary_trust, party_trust, government_trust, parliament_trust, UN_trust)|> filter(if_all(everything(), ~ !is.na(.))), MS = TRUE, alpha = TRUE, lambda.2 = TRUE, LCRC = TRUE, irc = TRUE)
+
+print(inst_trust_reliability_check)
+
+#Mokken anal sucessful, good scale, now construct:
+
+trust_items_EB86 <- c("judiciary_trust", "party_trust", "government_trust", "parliament_trust", "UN_trust")
+
+inst_trust_score <- rowMeans(EB86[, c("judiciary_trust", "party_trust", "government_trust", "parliament_trust", "UN_trust")], na.rm = TRUE)
+
+EB86$inst_trust <- rowSums(EB86[, trust_items_EB86], na.rm = TRUE) / 5
+
+```
+
+## Investigating N/A & Trimming Dataset
+
+```{r}
+
+#select relevant columns & filter non-eu & non-nato states
+EB86_selected <- EB86 |>
+  filter(p1 >= 7)|> #Filters out any observations taken before Wedneday 9th November (7th day of fieldwork)
+  filter(isocntry %in% c(
+  "BE", "BG", "HR", "CZ", "DK", "EE", "FR", 
+  "DE-E","DE-W", "GR", "HU", "IT", "LV", "LT", "LU", "NL", 
+  "PL", "PT", "RO", "SK", "SI", "ES", "GB-GBN"
+)) |>
+  dplyr::select(csdp_support, us_favourability_likert, us_favourability,  historical_threat_RU,
+   inclusive_id_dummy, exclusive_id_dummy, Age, euknowl,
+                global_capitalism, cultural_anti_am, inst_trust,isocntry,)
+
+gg_miss_fct(x = EB86_selected, fct = isocntry)
+
+#checking distribution of incomeplte cases ranomness:
+
+
+
+#removing all n/a, listwise deletion of incomeplete cases
+
+EB86_selected_clean <- EB86_selected |>
+  drop_na()
+
+gg_miss_fct(x = EB86_selected_clean, fct = isocntry)
+
+joint_eu_nato_ms <- c(
+  "BE", "BG", "HR", "CZ", "DK", "EE", "FR", 
+  "DE-E","DE-W", "GR", "HU", "IT", "LV", "LT", "LU", "NL", 
+  "PL", "PT", "RO", "SK", "SI", "ES", "GB-GBN")
+
+```
+
+## Models (New)
+
+```{r}
+
+#Basic Model
+
+reg2_bivar <- glm(`csdp_support` ~ `us_favourability_likert`, data = EB86_selected_clean, family = "binomial")
+
+r2_nagelkerke(reg2_bivar)
+modelsummary(reg2_bivar, stars = TRUE)
+
+#Basic model with controls
+
+reg2_controls <- glm(`csdp_support` ~ `us_favourability_likert`+`Age`+`inst_trust`+`global_capitalism`+`cultural_anti_am`+`euknowl`+`historical_threat_RU`+`inclusive_id_dummy`, data = EB86_selected_clean, family = "binomial")
+
+r2_nagelkerke(reg2_controls)
+modelsummary(reg2_controls, stars = TRUE)
+
+#Identity interaction
+
+reg2_identity <- glm(`csdp_support` ~ `us_favourability_likert`*`exclusive_id_dummy`, data = EB86_selected_clean, family = "binomial")
+
+r2_nagelkerke(reg2_identity)
+modelsummary(reg2_identity, stars = TRUE)
+
+
+#Identity interaction controls
+
+reg2_identity_controls <- glm(`csdp_support` ~ `us_favourability_likert`*`exclusive_id_dummy`
++`Age`+`inst_trust`+`global_capitalism`+`cultural_anti_am`+`euknowl`+`historical_threat_RU`+`inclusive_id_dummy`, data = EB86_selected_clean, family = "binomial")
+
+r2_nagelkerke(reg2_identity_controls)
+modelsummary(reg2_identity_controls, stars = TRUE)
+
+#Fixed effects Identity interaction
+
+reg2_identity_fe <- glm(`csdp_support` ~ `us_favourability_likert`*
+  `exclusive_id_dummy`+
+`Age`+`euknowl`+`global_capitalism`+`inst_trust` +`inclusive_id_dummy`
+  + factor(isocntry) # Country fixed effects
+  , data = EB86_selected_clean, family = "binomial",na.action = na.omit)
+
+r2_nagelkerke(reg2_identity_fe)
+modelsummary(reg2_identity_fe, stars = TRUE)
+
+```
+
+## Model Comparison 
+
+```{r}
+anova(reg2_bivar, reg2_controls,reg2_identity, reg2_identity_controls,reg2_identity_fe, test = "LRT")
+
+AIC(reg2_bivar, reg2_controls,reg2_identity, reg2_identity_controls,reg2_identity_fe)
+
+
+```
+
+## Presentation
+
+```{r}
+reg_list_new <- list(
+  reg2_bivar, reg2_controls,reg2_identity, reg2_identity_controls,reg2_identity_fe)
+
+
+
+#Odds ratio table
+modelsummary(
+  reg_list_new,
+  stars = TRUE,
+  coef_rename = c(
+    "(Intercept)" = "Constant",
+   "us_favourability_likert" = "Attitude Toward US",
+                       "us_favourability_likert:exclusive_id_dummyExclusive" = "US Attitude * Exclusive Identity Interaction",
+                       "inst_trust" = "Latent Political Trust",
+                       "global_capitalism0" = "Negative Attitude Towards Globalisation",
+                       "cultural_anti_amNegative" = "Anti-American Culture",
+                       "age" = "Age",
+                       "historical_threat_RUThreat" = "Historically Threatened by Russia",
+                       "euknowl" = "Respondent Sophistication",
+                       "inclusive_id_dummyInclusive" = "Inclusive Identity",
+                       "exclusive_id_dummyExclusive" = "Exclusive Identity"
+  ),
+  gof_map = c("nobs", "logLik"),
+  exponentiate = TRUE, # Converts log-odds to odds ratios
+  title = "CSDP Support",
+  notes = "Odds ratios with standard errors in parentheses",
+  model_order = 1:5,# adjusts model order
+  model_names = c("Model 1", "Model 2", "Model 3", "Model 4", "Model 5"))
+
+#To make into docx output, add: ,output = "LogitRegTableBAPv1.docx"
+
+
+# reg2_identity_controls odds ratio plot data
+reg2_identity_controls_odds_data <- tidy(reg2_identity_controls, exponentiate = TRUE, conf.int = TRUE) |> 
+  filter(term != "(Intercept)") # Exclude intercept for clarity
+
+# adding variable labels
+reg2_identity_controls_odds_data <- reg2_identity_controls_odds_data |> 
+  mutate(significant = ifelse(conf.low > 1 | conf.high < 1, "Significant", "Not Significant"))|>
+  mutate(term = dplyr::recode(term,
+                       "us_favourability_likert" = "Attitude Toward US",
+                       "us_favourability_likert:exclusive_id_dummyExclusive" = "US Attitude * Exclusive Identity Interaction",
+                       "inst_trust" = "Latent Political Trust",
+                       "global_capitalism0" = "Negative Attitude Towards Globalisation",
+                       "cultural_anti_amNegative" = "Anti-American Culture",
+                       "age" = "Age",
+                       "historical_threat_RUThreat" = "Historically Threatened by Russia",
+                       "euknowl" = "Respondent Sophistication",
+                       "inclusive_id_dummyInclusive" = "Inclusive Identity",
+                       "exclusive_id_dummyExclusive" = "Exclusive Identity"))
+
+
+
+ggplot(reg2_identity_controls_odds_data, aes(x = reorder(term, estimate), y = estimate, color = significant)) +
+  geom_point(size = 3, aes(shape = significant)) +  # Shapes and colors for significance
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.2) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red", linewidth = 1) +
+  coord_flip() +
+  labs(
+    title = "Odds Ratios with 95% Confidence Intervals",
+    x = "",
+    y = "Odds Ratio (Log Scale)"
+  ) +
+  scale_y_log10() +  # Log scale for easier interpretation
+  scale_color_manual(values = c("Significant" = "blue", "Not Significant" = "black")) +
+  scale_shape_manual(values = c("Significant" = 16, "Not Significant" = 17)) +  # Different point shapes
+  theme_light(base_size = 19) +
+  theme(legend.title = element_blank())  
+
+#Predicted proability of CSDP support by identitiy configuration
+
+#factor variable version of Identity_control model
+
+reg2_identity_controls_factor <- glm(`csdp_support` ~ `us_favourability`*`exclusive_id_dummy`
++`Age`+`inst_trust`+`global_capitalism`+`cultural_anti_am`+`euknowl`+`historical_threat_RU`+`inclusive_id_dummy`, data = EB86_selected_clean, family = "binomial")
+
+predictions(
+  reg2_identity_controls_factor, 
+  by = c("us_favourability", "exclusive_id_dummy"), 
+  newdata = "mean"
+) |> 
+  ggplot(aes(x = exclusive_id_dummy, y = estimate, shape = us_favourability, color = us_favourability)) + 
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high), position = position_dodge(width = 0.7)) + 
+  geom_text(
+    aes(label = round(estimate, 2)), 
+    position = position_dodge(width = 0.7), 
+    hjust = -0.3  # Adjust the label alignment to prevent overlap and align it with the points
+  ) + 
+  labs(
+    title = "Predicted CSDP Support by US Attitude and Identity Configuration", 
+    x = "Identity Configuration", 
+    y = "Predicted CSDP Support", 
+    shape = "US Attitude",
+    color = "US Attitude"
+  ) + 
+  scale_y_continuous(limits = c(0.8, 1)) +
+  scale_color_manual(values = c("Negative" = "red", "Neutral" = "black", "Positive" = "blue")) + 
+  theme_light()  # Apply a light theme for a clean background
+
+#likert variable version of Identity_control model
+
+reg2_identity_controls_preds <- predictions(reg2_identity_controls, 
+            newdata = datagrid(us_favourability_likert = c(1,2,3), 
+                               exclusive_id_dummy = c("Not Exclusive", "Exclusive")))
+
+ggplot(reg2_identity_controls_preds, aes(x = us_favourability_likert, y = estimate, linetype = exclusive_id_dummy)) + 
+  geom_line(aes(color = exclusive_id_dummy)) +  # Apply color to the lines only
+  geom_ribbon(aes(ymin = conf.low, ymax = conf.high), alpha = 0.2) +  # No color for the ribbon
+  labs(
+    title = "Predicted CSDP Support by US Attitude and Identity Configuration", 
+    x = "US Attitude", 
+    y = "Predicted Values", 
+    linetype = "Identity Configuration"
+  ) + 
+  scale_x_continuous(breaks = c(1, 2, 3)) + 
+  scale_color_manual(values = c("red", "blue")) + # Color lines red and blue
+  scale_linetype_manual(values = c("solid", "dashed")) + # Line styles
+  theme_light() +  # Apply light theme
+  guides(color = guide_legend(title = "Identity Configuration"), 
+         linetype = guide_legend(title = "Identity Configuration"))  # Combine legends
+
+
+```
+
+## Assumptions Testing (New)
+
+```{r}
+
+#Multicollinearity
+
+#vif(reg2_bivar)
+vif(reg2_identity)
+vif(reg2_identity_controls)
+vif(reg2_identity_fe)
+
+
+#linearity of logit
+
+
+
+#identifying continuous predictors
+sapply(EB86_selected_clean, class)
+
+#reg2_bivar
+
+EB86_selected_clean_reg2_bivar <- augment(reg2_bivar, data = EB86_selected_clean)|>
+  mutate(index = 1:n()) 
+
+
+
+ggplot(EB86_selected_clean_reg2_bivar, aes(us_favourability_likert, .fitted))+
+  geom_point() +
+  geom_smooth(method = "loess")+
+  labs(title = "US Attitude vs Fitted Values for reg2_bivariate")
+
+
+
+#reg2_identity
+
+EB86_selected_clean_reg2_identity <- augment(reg2_identity, data = EB86_selected_clean)|>
+  mutate(index = 1:n()) 
+
+ggplot(EB86_selected_clean_reg2_identity, aes(us_favourability_likert, .fitted))+
+  geom_point() +
+  geom_smooth(method = "loess")+
+  labs(title = "US Attitude vs Fitted Values for reg2_identity")
+
+#reg2_controls
+
+EB86_selected_clean_reg2_controls <- augment(reg2_controls, data = EB86_selected_clean)|>
+  mutate(index = 1:n()) 
+
+continuous_vars <- c("us_favourability_likert", "Age", "euknowl", "inst_trust")
+
+
+reg2_controls_logit_linearity_plots <- map(continuous_vars, ~ {
+  ggplot(EB86_selected_clean_reg2_controls, aes(x = .data[[.x]], y = .fitted)) +
+    geom_point() +
+    geom_smooth(method = "loess") +
+    labs(
+      title = paste("Fitted Values vs", .x, "for reg2_controls"),
+      x = .x,
+      y = "Fitted Values"
+    )
+})
+
+reg2_controls_logit_linearity_plots
+
+#reg2_identity_controls
+
+EB86_selected_clean_reg2_identity_controls <- augment(reg2_identity_controls, data = EB86_selected_clean)|>
+  mutate(index = 1:n()) 
+
+reg2_identity_controls_logit_linearity_plots <- map(continuous_vars, ~ {
+  ggplot(EB86_selected_clean_reg2_identity_controls, aes(x = .data[[.x]], y = .fitted)) +
+    geom_point() +
+    geom_smooth(method = "loess") +
+    labs(
+      title = paste("Fitted Values vs", .x, "for reg2_identity_controls"),
+      x = .x,
+      y = "Fitted Values"
+    )
+})
+
+reg2_identity_controls_logit_linearity_plots
+
+#reg2_identity_fe
+
+EB86_selected_clean_reg2_identity_fe <- augment(reg2_identity_fe, data = EB86_selected_clean)|>
+  mutate(index = 1:n()) 
+
+reg2_identity_fe_logit_linearity_plots <- map(continuous_vars, ~ {
+  ggplot(EB86_selected_clean_reg2_identity_fe, aes(x = .data[[.x]], y = .fitted)) +
+    geom_point() +
+    geom_smooth(method = "loess") +
+    labs(
+      title = paste("Fitted Values vs", .x, "for reg2_identity_fe"),
+      x = .x,
+      y = "Fitted Values"
+    )
+})
+
+reg2_identity_fe_logit_linearity_plots
+
+#Outliers:
+
+# reg2_bivar
+EB86_selected_clean_reg2_bivar <- EB86_selected_clean_reg2_bivar |> 
+  dplyr::mutate(SRE1.96 = dplyr::case_when(
+    .std.resid > 1.96 | .std.resid < -1.96  ~ 1,
+    .std.resid > -1.96 & .std.resid < 1.96 ~ 0
+  ),
+  SRE2.58 = dplyr::case_when(
+    .std.resid > 2.58 | .std.resid < -2.58  ~ 1,
+    .std.resid > -2.58 & .std.resid < 2.58 ~ 0
+  ),
+  SRE3.29 = dplyr::case_when(
+    .std.resid > 3.29 | .std.resid < -3.29  ~ 1,
+    .std.resid > -3.29 & .std.resid < 3.29 ~ 0
+  ))
+expss::fre(EB86_selected_clean_reg2_bivar$SRE1.96)
+expss::fre(EB86_selected_clean_reg2_bivar$SRE2.58)
+expss::fre(EB86_selected_clean_reg2_bivar$SRE3.29)
+
+
+ggplot(EB86_selected_clean_reg2_bivar, aes(index, .std.resid)) + 
+  geom_point(aes(color = factor(SRE1.96))) + 
+  scale_color_manual(values = c("1" = "red", "0" = "blue"), 
+                     labels = c("1" = "SRE > 1.96", "0" = "SRE < 1.96")) + 
+  labs(
+    x = "Case Number", 
+    y = "Standardized Residuals", 
+    title = "Standardised Residuals Bivariate Model", 
+    color = "CSDP Support"
+  ) + 
+  theme_light()
+
+
+# reg2_identity
+EB86_selected_clean_reg2_identity <- EB86_selected_clean_reg2_identity |> 
+  dplyr::mutate(SRE1.96 = dplyr::case_when(
+    .std.resid > 1.96 | .std.resid < -1.96  ~ 1,
+    .std.resid > -1.96 & .std.resid < 1.96 ~ 0
+  ),
+  SRE2.58 = dplyr::case_when(
+    .std.resid > 2.58 | .std.resid < -2.58  ~ 1,
+    .std.resid > -2.58 & .std.resid < 2.58 ~ 0
+  ),
+  SRE3.29 = dplyr::case_when(
+    .std.resid > 3.29 | .std.resid < -3.29  ~ 1,
+    .std.resid > -3.29 & .std.resid < 3.29 ~ 0
+  ))
+expss::fre(EB86_selected_clean_reg2_identity$SRE1.96)
+expss::fre(EB86_selected_clean_reg2_identity$SRE2.58)
+expss::fre(EB86_selected_clean_reg2_identity$SRE3.29)
+
+ggplot(EB86_selected_clean_reg2_identity, aes(index, .std.resid)) + 
+  geom_point(aes(color = factor(SRE1.96))) + 
+  scale_color_manual(values = c("1" = "red", "0" = "blue"), 
+                     labels = c("1" = "SRE > 1.96", "0" = "SRE < 1.96")) + 
+  labs(
+    x = "Case Number", 
+    y = "Standardized Residuals", 
+    title = "Standardised Residuals Identity Interaction Model", 
+    color = "CSDP Support"
+  ) + 
+  theme_light()
+
+
+# reg2_controls
+EB86_selected_clean_reg2_controls <- EB86_selected_clean_reg2_controls |> 
+  dplyr::mutate(SRE1.96 = dplyr::case_when(
+    .std.resid > 1.96 | .std.resid < -1.96  ~ 1,
+    .std.resid > -1.96 & .std.resid < 1.96 ~ 0
+  ),
+  SRE2.58 = dplyr::case_when(
+    .std.resid > 2.58 | .std.resid < -2.58  ~ 1,
+    .std.resid > -2.58 & .std.resid < 2.58 ~ 0
+  ),
+  SRE3.29 = dplyr::case_when(
+    .std.resid > 3.29 | .std.resid < -3.29  ~ 1,
+    .std.resid > -3.29 & .std.resid < 3.29 ~ 0
+  ))
+expss::fre(EB86_selected_clean_reg2_controls$SRE1.96)
+expss::fre(EB86_selected_clean_reg2_controls$SRE2.58)
+expss::fre(EB86_selected_clean_reg2_controls$SRE3.29)
+
+ggplot(EB86_selected_clean_reg2_controls, aes(index, .std.resid)) + 
+  geom_point(aes(color = factor(SRE1.96))) + 
+  scale_color_manual(values = c("1" = "red", "0" = "blue"), 
+                     labels = c("1" = "SRE > 1.96", "0" = "SRE < 1.96")) + 
+  labs(
+    x = "Case Number", 
+    y = "Standardized Residuals", 
+    title = "Standardised Residuals Controls Model", 
+    color = "CSDP Support"
+  ) + 
+  theme_light()
+
+# reg2_identity_controls
+EB86_selected_clean_reg2_identity_controls <- EB86_selected_clean_reg2_identity_controls |> 
+  dplyr::mutate(SRE1.96 = dplyr::case_when(
+    .std.resid > 1.96 | .std.resid < -1.96  ~ 1,
+    .std.resid > -1.96 & .std.resid < 1.96 ~ 0
+  ),
+  SRE2.58 = dplyr::case_when(
+    .std.resid > 2.58 | .std.resid < -2.58  ~ 1,
+    .std.resid > -2.58 & .std.resid < 2.58 ~ 0
+  ),
+  SRE3.29 = dplyr::case_when(
+    .std.resid > 3.29 | .std.resid < -3.29  ~ 1,
+    .std.resid > -3.29 & .std.resid < 3.29 ~ 0
+  ))
+expss::fre(EB86_selected_clean_reg2_identity_controls$SRE1.96)
+expss::fre(EB86_selected_clean_reg2_identity_controls$SRE2.58)
+expss::fre(EB86_selected_clean_reg2_identity_controls$SRE3.29)
+
+ggplot(EB86_selected_clean_reg2_identity_controls, aes(index, .std.resid)) + 
+  geom_point(aes(color = factor(SRE1.96))) + 
+  scale_color_manual(values = c("1" = "red", "0" = "blue"), 
+                     labels = c("1" = "SRE > 1.96", "0" = "SRE < 1.96")) + 
+  labs(
+    x = "Case Number", 
+    y = "Standardized Residuals", 
+    title = "Standardised Residuals Identity Interaction + Controls Model", 
+    color = "CSDP Support"
+  ) + 
+  theme_light()
+
+
+#reg2_identity_fe
+
+EB86_selected_clean_reg2_identity_fe <- EB86_selected_clean_reg2_identity_fe |> 
+  dplyr::mutate(SRE1.96 = dplyr::case_when(
+    .std.resid > 1.96 | .std.resid < -1.96  ~ 1,
+    .std.resid > -1.96 & .std.resid < 1.96 ~ 0
+  ),
+  SRE2.58 = dplyr::case_when(
+    .std.resid > 2.58 | .std.resid < -2.58  ~ 1,
+    .std.resid > -2.58 & .std.resid < 2.58 ~ 0),
+  SRE3.29 = dplyr::case_when(
+    .std.resid > 3.29 | .std.resid < -3.29  ~ 1,
+    .std.resid > -3.29 & .std.resid < 3.29 ~ 0
+  ))
+
+expss::fre(EB86_selected_clean_reg2_identity_fe$SRE1.96)
+expss::fre(EB86_selected_clean_reg2_identity_fe$SRE2.58)
+expss::fre(EB86_selected_clean_reg2_identity_fe$SRE3.29)
+
+ggplot(EB86_selected_clean_reg2_identity_fe, aes(index, .std.resid)) + 
+  geom_point(aes(color = factor(SRE1.96))) + 
+  scale_color_manual(values = c("1" = "red", "0" = "blue"), 
+                     labels = c("1" = "SRE > 1.96", "0" = "SRE < 1.96")) + 
+  labs(
+    x = "Case Number", 
+    y = "Standardized Residuals", 
+    title = "Standardised Residuals Identity Interaction + Fixed Effects Model", 
+    color = "CSDP Support"
+  ) + 
+  theme_light()
+
+
+#Influential cases
+
+# reg2_bivar
+resid_panel(reg2_bivar, plots = c("cookd"))
+
+# reg2_identity
+resid_panel(reg2_identity, plots = c("cookd"))
+
+# reg2_controls
+resid_panel(reg2_controls, plots = c("cookd"))
+
+# reg2_identity_controls
+resid_panel(reg2_identity_controls, plots = c("cookd"))
+
+#reg2_identity_fe
+
+resid_panel(reg2_identity_fe, plots = c("cookd"))
+
+```
+
+## Comparison to Null Model
+
+```{r}
+
+fre(EB86_selected_clean$csdp_support)
+mean(EB86_selected_clean$csdp_support)
+
+# Function to calculate accuracy and percentage correct
+calculate_percentage_correct <- function(model, data, cutoff = 0.5) {
+  predicted_probs <- predict(model, type = "response")  # Predicted probabilities
+  predicted_classes <- ifelse(predicted_probs > cutoff, 1, 0)  # Binary predictions
+  actual_classes <- data$csdp_support  # Actual outcomes
+  correct_predictions <- sum(predicted_classes == actual_classes, na.rm = TRUE)  # Correctly predicted
+  sample_size <- sum(!is.na(actual_classes))  # Exclude NAs for sample size
+  percentage_correct <- (correct_predictions / sample_size) * 100  # Percentage correct
+  list(correct_predictions = correct_predictions, percentage_correct = percentage_correct)
+}
+
+# Calculate accuracy for each model
+bivar_results <- calculate_percentage_correct(reg2_bivar, EB86_selected_clean)
+controls_results <- calculate_percentage_correct(reg2_controls, EB86_selected_clean)
+identity_results <- calculate_percentage_correct(reg2_identity, EB86_selected_clean)
+identity_controls_results <- calculate_percentage_correct(reg2_identity_controls, EB86_selected_clean)
+identity_fe_results <- calculate_percentage_correct(reg2_identity_fe, EB86_selected_clean)
+
+# Display the results
+cat("Correctly Predicted Cases and Percentages:\n")
+cat("Bivariate Model: ", bivar_results$correct_predictions, "(", round(bivar_results$percentage_correct, 2), "%)\n")
+cat("Controls Model: ", controls_results$correct_predictions, "(", round(controls_results$percentage_correct, 2), "%)\n")
+cat("Identity Interaction Model: ", identity_results$correct_predictions, "(", round(identity_results$percentage_correct, 2), "%)\n")
+cat("Identity Interaction with Controls Model: ", identity_controls_results$correct_predictions, "(", round(identity_controls_results$percentage_correct, 2), "%)\n")
+cat("Fixed Effects Model: ", identity_fe_results$correct_predictions, "(", round(identity_fe_results$percentage_correct, 2), "%)\n")
+
+
+
+# Function to calculate ROC and AUC for each model
+calculate_auc <- function(model, data, model_name) {
+  # Get predicted probabilities from the model
+  predicted_probs <- predict(model, type = "response") 
+  # Actual outcomes (the ground truth)
+  actual_classes <- data$csdp_support  
+  
+  # Calculate ROC curve
+  roc_curve <- roc(actual_classes, predicted_probs) 
+  
+  # Calculate AUC (Area Under the Curve)
+  auc_value <- auc(roc_curve)
+  
+  # Plot the ROC curve
+  plot(roc_curve, main = paste("ROC Curve for", model_name), col = "blue", lwd = 2)
+  
+  # Return the AUC value
+  cat("AUC for", model_name, ":", auc_value, "\n")
+  
+  return(auc_value)
+}
+
+# Calculate and print AUC for each model
+bivar_auc <- calculate_auc(reg2_bivar, EB86_selected_clean, "Bivariate Model")
+controls_auc <- calculate_auc(reg2_controls, EB86_selected_clean, "Controls Model")
+identity_auc <- calculate_auc(reg2_identity, EB86_selected_clean, "Identity Interaction Model")
+identity_controls_auc <- calculate_auc(reg2_identity_controls, EB86_selected_clean, "Identity Interaction with Controls Model")
+identity_fe_auc <- calculate_auc(reg2_identity_fe, EB86_selected_clean, "Fixed Effects Model")
+
+
+# Make sure you have the predicted probabilities for each model
+predict_bivar <- predict(reg2_bivar, type = "response")
+predict_controls <- predict(reg2_controls, type = "response")
+predict_identity <- predict(reg2_identity, type = "response")
+predict_identity_controls <- predict(reg2_identity_controls, type = "response")
+predict_identity_fe <- predict(reg2_identity_fe, type = "response")
+
+# Actual outcomes
+actual <- factor(EB86_selected_clean$csdp_support, levels = c(0, 1))  # 0 is negative, 1 is positive class
+
+# Swap the classes to calculate PR AUC for class 0 (non-supporters)
+roc_bivar_neg <- roc(actual, 1 - predict_bivar, levels = c(0, 1))  # Swap to focus on the negative class
+roc_controls_neg <- roc(actual, 1 - predict_controls, levels = c(0, 1))
+roc_identity_neg <- roc(actual, 1 - predict_identity, levels = c(0, 1))
+roc_identity_controls_neg <- roc(actual, 1 - predict_identity_controls, levels = c(0, 1))
+roc_identity_fe_neg <- roc(actual, 1 - predict_identity_fe, levels = c(0, 1))
+
+# Print PR AUC for each model focused on the negative class
+cat("PR AUC for Bivariate Model (negative class):", auc(roc_bivar_neg), "\n")
+cat("PR AUC for Model with Controls (negative class):", auc(roc_controls_neg), "\n")
+cat("PR AUC for Identity Model (negative class):", auc(roc_identity_neg), "\n")
+cat("PR AUC for Identity Controls Model (negative class):", auc(roc_identity_controls_neg), "\n")
+cat("PR AUC for Fixed Effects Model (negative class):", auc(roc_identity_fe_neg), "\n")
+```
